@@ -26,14 +26,10 @@ $ ./update-license-headers --ext="js"
 
 ## TODO
 
--Refactor code
-
--Allow multiple file extensions
-
--Add --help option
-
--Allow --verbose logging option
-
--Allow --dry-run option
+* Refactor code
+* Allow multiple file extensions
+* Add --help option
+* Allow --verbose logging option
+* Allow --dry-run option
 
 [SugarCRM]: http://www.sugarcrm.com/
