@@ -18,6 +18,11 @@ if (version_compare(PHP_VERSION, '5.3.', '<')) {
     throw new \RuntimeException("This script requires php 5.3.0 version or above.");
 }
 
+// Pretend we are a valid sugar entry point
+if (!defined('sugarEntry')) {
+    define('sugarEntry', true);
+}
+
 $headerText = '/*
  * By installing or using this file, you are confirming on behalf of the entity
  * subscribed to the SugarCRM Inc. product ("Company") that Company is bound by
@@ -34,6 +39,14 @@ $commentBlockMap = array(
     "hbs" => array(
         "start_tok" => "{{!",
         "end_tok" => "}}",
+    ),
+    "html" => array(
+        "start_tok" => "<!--",
+        "end_tok" => "-->",
+    ),
+    "tpl" => array(
+        "start_tok" => "<!--",
+        "end_tok" => "-->",
     ),
     "default" => array(
         "start_tok" => "/*",
@@ -70,7 +83,8 @@ if (!empty($opts['e'])) {
 
 $rdi = new RecursiveDirectoryIterator($dir);
 foreach(new RecursiveIteratorIterator($rdi) as $file) {
-    $ext = pathinfo($file, PATHINFO_EXTENSION);
+    $fileExt = pathinfo($file, PATHINFO_EXTENSION);
+    $ext = $fileExt;
 
     if ($type === 'all' || $ext === $type) {
         $str = file_get_contents($file);
@@ -80,6 +94,22 @@ foreach(new RecursiveIteratorIterator($rdi) as $file) {
 
         if (!array_key_exists($ext, $commentBlockMap)) {
             $ext = 'default';
+        }
+
+        // Generate an appropriate header for the file.
+        $header = $headerText;
+        if ($ext !== 'default') {
+            if ($ext === 'hbs') {
+                // Ultimately, we want to have the "{{!--" token used in hbs
+                // license headers regardless of whether "{{!--" or "{{!" was used.
+                // This slight hack is OK because "{{!" is a subset of "{{!--".
+                $startTok = "{{!--";
+                $endTok = "--}}";
+                $header = $startTok . "\n" . $headerText . "\n" . $endTok;
+            } else {
+                $header = $commentBlockMap[$ext]['start_tok'] . "\n" . $headerText . "\n" .
+                    $commentBlockMap[$ext]['end_tok'];
+            }
         }
 
         $startTokLen = strlen($commentBlockMap[$ext]['start_tok']);
@@ -105,21 +135,6 @@ foreach(new RecursiveIteratorIterator($rdi) as $file) {
         }
 
         if (!empty($final)) {
-            $header = $headerText;
-            if ($ext !== 'default') {
-                if ($ext === 'hbs') {
-                    // Ultimately, we want to have the "{{!--" token used in hbs
-                    // license headers regardless of whether "{{!--" or "{{!" was used.
-                    // This slight hack is OK because "{{!" is a subset of "{{!--".
-                    $startTok = "{{!--";
-                    $endTok = "--}}";
-                    $header = $startTok . "\n" . $headerText . "\n" . $endTok;
-                } else {
-                    $header = $commentBlockMap[$ext]['start_tok'] . "\n" . $headerText . "\n" .
-                        $commentBlockMap[$ext]['end_tok'];
-                }
-            }
-
             $commentLength = $final['end'] - $final['start'] + $endTokLen;
             $comment = substr($str, $final['start'], $commentLength);
             if (strcmp($header, $comment) !== 0) {
@@ -129,13 +144,36 @@ foreach(new RecursiveIteratorIterator($rdi) as $file) {
                     file_put_contents($file, $str, LOCK_EX);
                     echo "{$file} ✓\n";
                 } else {
-                    echo "Comment found. No license headers found in {$file}\n";
+                    echo "Comment found. No license headers found in {$file}, inserting new license header\n";
+                    insertHeader($file, $str, $fileExt, $header);
                 }
             } else {
                 echo "License header up to date in {$file}\n";
             }
         } else {
-            echo "No license headers found in {$file}\n";
+            echo "No license headers found in {$file}, inserting new license header\n";
+            insertHeader($file, $str, $fileExt, $header);
         }
+    }
+}
+
+function insertHeader($file, $str, $fileType, $licenseHeader)
+{
+    // We can't insert license headers in these types of files.
+    $blacklist = array('json');
+    // These files require tokens preceding the license header itself.
+    $prependTokenMap = array(
+        "php" => "<?php"
+    );
+
+    if (!in_array($fileType, $blacklist)) {
+        if (array_key_exists($fileType, $prependTokenMap)) {
+            // We need to prepend the token to the license header first.
+            $licenseHeader = $prependTokenMap[$fileType] . "\n" . $licenseHeader;
+            $str = str_replace($prependTokenMap[$fileType], $licenseHeader, $str);
+        } else {
+            $str = $licenseHeader . "\n" . $str;
+        }
+        file_put_contents($file, $str, LOCK_EX);
     }
 }
