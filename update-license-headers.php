@@ -101,8 +101,8 @@ EOT;
             'end_tok' => '-->',
         ),
         'tpl' => array(
-            'start_tok' => '<!--',
-            'end_tok' => '-->',
+            'start_tok' => '{*',
+            'end_tok' => '*}',
         ),
         'default' => array(
             'start_tok' => '/*',
