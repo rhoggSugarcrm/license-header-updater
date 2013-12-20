@@ -60,8 +60,9 @@ function process($argv) {
 
     foreach($files as $file) {
         $ext = pathinfo($file, PATHINFO_EXTENSION);
-        if ($type === 'all' || $ext === $type) {
-            $updater->setFileExt($ext);
+        if (($type === 'all' || $ext === $type) && is_writable($file)) {
+            $updater->fileExt = $ext;
+            $updater->fileContent = file_get_contents($file);
             $updater->run($file, $ext);
         }
     }
@@ -69,13 +70,29 @@ function process($argv) {
 
 class LicenseUpdater
 {
-    protected $fileExt = '';
+    /**
+     * The extension of the current file.
+     * @var string
+     */
+    public $fileExt = '';
 
-    protected $fileContent = '';
+    /**
+     * The contents of the current file.
+     * @var string
+     */
+    public $fileContent = '';
 
-    // We can't insert license headers in these types of files.
+    // TODO: Change the logic to a whitelist instead, and consider making it public!
+    /**
+     * We can't insert license headers in these types of files.
+     * @var array
+     */
     protected $blacklist = array('json');
 
+    /**
+     * This is the default license header itself.
+     * @var nowdoc
+     */
     protected $headerText = <<<'EOT'
 /*
  * By installing or using this file, you are confirming on behalf of the entity
@@ -91,10 +108,16 @@ class LicenseUpdater
  */
 EOT;
 
-    protected $commentBlockMap = array(
+    /**
+     * This is a map that defines comment block start and end tokens
+     * for certain file types. Tokens that are to be used in the license
+     * header should be stored in this variable.
+     * @var array
+     */
+    protected $defaultTokenPairs = array(
         'hbs' => array(
-            'start_tok' => '{{!',
-            'end_tok' => '}}',
+            'start_tok' => '{{!--',
+            'end_tok' => '--}}'
         ),
         'html' => array(
             'start_tok' => '<!--',
@@ -104,74 +127,83 @@ EOT;
             'start_tok' => '{*',
             'end_tok' => '*}',
         ),
-        'default' => array(
+        'standard' => array(
             'start_tok' => '/*',
             'end_tok' => '*/',
         ),
     );
 
-    // These files require tokens preceding the license header itself.
+    /**
+     * This is a map that defines comment block start and end tokens
+     * for certain file types. Some file types may have varying tokens
+     * (e.g. .hbs, .tpl files), so these are stored in this variable.
+     * @var array
+     */
+    protected $alternateTokenPairs = array(
+        'hbs' => array(
+            array(
+                'start_tok' => '{{!',
+                'end_tok' => '}}',
+            ),
+        ),
+        'tpl' => array(
+            array(
+                'start_tok' => '<!--',
+                'end_tok' => '-->',
+            ),
+        ),
+    );
+
+    /**
+     * These files require tokens preceding the license header itself.
+     * @var array
+     */
     protected $prependTokenMap = array(
         'php' => '<?php'
     );
 
-    public function setFileExt($ext)
-    {
-        $this->fileExt = $ext;
-    }
-
+    /**
+     * Main script-execution method. Generates the appropriate header
+     * per filetype, and parses the files to replace/insert the header
+     * accordingly.
+     * @param  string $file The file's contents.
+     * @param  string $ext  The file's extension.
+     */
     public function run($file, $ext)
     {
-        $this->fileContent = file_get_contents($file);
-        $len = strlen($this->fileContent);
-        $stack = array();
-        $final = array();
-
-        if (!array_key_exists($ext, $this->commentBlockMap)) {
-            $ext = 'default';
+        if (!array_key_exists($ext, $this->defaultTokenPairs)) {
+            $ext = 'standard';
         }
+
+        $tokens = $this->defaultTokenPairs[$ext];
 
         // Generate an appropriate header for the file.
         $header = $this->headerText;
-        if ($ext !== 'default') {
-            if ($ext === 'hbs') {
-                // Ultimately, we want to have the "{{!--" token used in hbs
-                // license headers regardless of whether "{{!--" or "{{!" was used.
-                // This slight hack is OK because "{{!" is a subset of "{{!--".
-                $startTok = "{{!--";
-                $endTok = "--}}";
-                $header = $startTok . "\n" . $this->headerText . "\n" . $endTok;
-            } else {
-                $header = $this->commentBlockMap[$ext]['start_tok'] . "\n" . $this->headerText . "\n" .
-                    $this->commentBlockMap[$ext]['end_tok'];
-            }
+        if ($ext !== 'standard') {
+            $header = $tokens['start_tok'] . "\n" . $this->headerText . "\n" .
+                $tokens['end_tok'];
         }
 
-        $startTokLen = strlen($this->commentBlockMap[$ext]['start_tok']);
-        $endTokLen = strlen($this->commentBlockMap[$ext]['end_tok']);
+        // Try to obtain the header with the default tokens.
+        $headerPos = $this->getHeaderPosition($tokens);
 
-        for($pos = 0; $pos < $len; $pos++) {
-            $isStartTok = substr($this->fileContent, $pos, $startTokLen);
-            $isEndTok = substr($this->fileContent, $pos, $endTokLen);
-
-            if ($isStartTok === $this->commentBlockMap[$ext]['start_tok']) {
-                array_push($stack, $pos);
-            } else if ($isEndTok === $this->commentBlockMap[$ext]['end_tok']) {
-                if (count($stack) === 1) {
-                    $final = array(
-                        'start' => reset($stack),
-                        'end' => $pos
-                    );
+        // If empty, try obtaining the header with alternate tokens.
+        if (empty($headerPos) && array_key_exists($this->fileExt, $this->alternateTokenPairs)) {
+            foreach($this->alternateTokenPairs[$this->fileExt] as $pair) {
+                $headerPos = $this->getHeaderPosition($pair);
+                if (!empty($headerPos)) {
+                    $tokens = $pair;
                     break;
-                } else {
-                    array_pop($stack);
                 }
             }
         }
 
-        if (!empty($final)) {
-            $commentLength = $final['end'] - $final['start'] + $endTokLen;
-            $comment = substr($this->fileContent, $final['start'], $commentLength);
+        if (!empty($headerPos)) {
+            // Obtain the substring license header in the current file, to analyze/replace it.
+            $endTokLen = strlen($tokens['end_tok']);
+            $commentLength = $headerPos['end'] - $headerPos['start'] + $endTokLen;
+            $comment = substr($this->fileContent, $headerPos['start'], $commentLength);
+
             if (strcmp($header, $comment) !== 0) {
                 // Check if this is in fact a license header comment.
                 if (stripos($comment, 'all rights reserved') !== false) {
@@ -191,6 +223,51 @@ EOT;
         }
     }
 
+    /**
+     * This function parses the file content and returns the start
+     * and end positions of the header's comment block tokens. It
+     * pushes to a stack whenever a start token is found and pops
+     * the stack element whenever an end token is found, returning
+     * the positions when the stack is empty.
+     * @param  array $tokenPair An array of start/end tokens.
+     * @return array $result
+     */
+    protected function getHeaderPosition($tokenPair)
+    {
+        $result = array();
+        $stack = array();
+        $len = strlen($this->fileContent);
+        $startTokLen = strlen($tokenPair['start_tok']);
+        $endTokLen = strlen($tokenPair['end_tok']);
+
+        for($pos = 0; $pos < $len; $pos++) {
+            $isStartTok = substr($this->fileContent, $pos, $startTokLen);
+            $isEndTok = substr($this->fileContent, $pos, $endTokLen);
+
+            if ($isStartTok === $tokenPair['start_tok']) {
+                array_push($stack, $pos);
+            } else if ($isEndTok === $tokenPair['end_tok']) {
+                if (count($stack) === 1) {
+                    $result = array(
+                        'start' => reset($stack),
+                        'end' => $pos
+                    );
+                    return $result;
+                } else {
+                    array_pop($stack);
+                }
+            }
+        }
+    }
+
+    /**
+     * Inserts the $licenseHeader into the $file provided, at the beginning
+     * of the file. If certain files (such as php), require certain tokens to
+     * be prepended to the file before the license header itself, this function
+     * accounts for that case.
+     * @param  string $file The file's contents.
+     * @param  string $licenseHeader The desired license header.
+     */
     protected function insertHeader($file, $licenseHeader)
     {
         if (!in_array($this->fileExt, $this->blacklist)) {
